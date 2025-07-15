@@ -7,4 +7,4 @@ This is for the article "Unequal and deteriorating sustainability trends over th
     * Nightlight – as SES indicator
     * NVDI – as a green health indicator
 
-The involved annual average indicator data have been located in the 'grid_data_2000_2019' folder. For the relevant code, please see the 'code.Rmd' document.
+The involved annual average indicator data have been located in the [Figshare](https://figshare.com/account/items/29565470/edit). For the relevant code, please see the 'code.Rmd' document.
