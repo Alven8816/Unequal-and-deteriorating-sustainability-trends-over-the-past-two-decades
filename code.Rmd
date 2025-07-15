@@ -1,0 +1,593 @@
+---
+title: "Unequal and deteriorating sustainability trends over the past two decades"
+author: "Alven Yu"
+date: '2025-07-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(broom)
+library(raster)
+library(stars)
+library(rasterVis)
+library(sf)
+library(sp)
+library(rnaturalearth)
+```
+
+    This is the main code for article "Unequal and deteriorating sustainability trends over the past two decades". We select the most representative indicators to measure the sustaintability trends over the past two decades. The indicators are:
+    
+    * PM2.5 – as an environmental health indicator
+    * CO2 – as an emission indicator
+    * Nightlight – as SES indicator
+    * NVDI – as a green health indicator
+    
+
+## 1. The change in indicator values per decade
+
+```{r}
+trend_function_update <- function(indictor = "co2") {
+        
+        grid_data_data_df <- readRDS(paste0(
+                        "./grid_data_2000_2019/grid_",
+                        indictor,
+                        "_data_df_update.rds"
+                ))
+       
+        # the lm for trend
+        e1 <- Sys.time()
+        trend_data <-
+                grid_data_data_df %>% nest(data = -c(x, y)) %>% mutate(model = map(data, ~ lm(value ~ year, data = .)),
+                                                                       tidied = map(model, tidy)) %>% unnest(tidied) %>%
+                filter(term %in% c("year")) %>%
+                dplyr::select(x, y, estimate,p.value)
+        
+        saveRDS(trend_data,
+                file = paste0("./Results/data/trend_", indictor, "update2.rds"))
+        e2 <- Sys.time()
+        
+        e2 - e1
+        
+        
+        # clean the extreme values
+        trend_data_clean <- trend_data %>%
+                filter((
+                        estimate >= quantile(trend_data$estimate, 0.0001, na.rm = TRUE)
+                ) & (
+                        estimate <= quantile(trend_data$estimate, 0.9999, na.rm = TRUE)
+                )) %>%
+                mutate(estimate = estimate * 10) %>% # per decade
+                dplyr::select(x, y, estimate)
+        
+        raster_trend_data_clean <-
+                raster::rasterFromXYZ(xyz = trend_data_clean, crs = "+proj=longlat +datum=WGS84 +no_defs")
+        
+        raster::writeRaster(
+                x = raster_trend_data_clean,
+                filename = paste0("./Results/", indictor, "_trend_global", "_update.tif"),
+                format = "GTiff",
+                overwrite = TRUE
+        )
+}
+```
+
+```{r}
+trend_function_update(indictor = "PM2_5")
+
+trend_function_update(indictor = "co2")
+
+trend_function_update(indictor = "NDVI")
+
+trend_function_update(indictor = "nightlight")
+
+```
+
+## 2. combined with indictors
+
+```{r}
+# load indictor raster
+PM2_5_trend <- raster::raster("./Results/PM2_5_trend_global_update.tif")
+co2_trend <- raster::raster("./Results/co2_trend_global_update.tif")
+nightlight_trend <- raster::raster("./Results/nightlight_trend_global_update.tif")
+NDVI_trend <- raster::raster("./Results/NDVI_trend_global_update.tif")
+
+# crop to the same extent
+new_extent <- extent(-180, 180, -55.4, 74)
+co2_trend_crop <- raster::crop(co2_trend, new_extent)
+nightlight_trend_crop <- raster::crop(nightlight_trend, new_extent)
+NDVI_trend_crop <- raster::crop(NDVI_trend, new_extent)
+
+raster_stack_co2_nl_ndvi <- stack(co2_trend_crop, nightlight_trend_crop, NDVI_trend_crop)
+
+# convert to the same extent for PM2.5
+PM2_5_trend_crop <- resample(PM2_5_trend, raster_stack_co2_nl_ndvi,  method='bilinear')
+
+raster_stack_all <- stack(raster_stack_co2_nl_ndvi, PM2_5_trend_crop)
+
+rm(co2_trend_crop, nightlight_trend_crop, NDVI_trend_crop, PM2_5_trend_crop)
+rm(NDVI_trend, nightlight_trend, co2_trend, PM2_5_trend,raster_stack_co2_nl_ndvi)
+
+# save the stack raster
+# convert the raster to stars
+raster_stack_all <- st_as_stars(raster_stack_all)
+
+# save the stars as tif
+write_stars(raster_stack_all, "./Results/raster_stack_all_update.tif")
+
+```
+
+## 3. classification of the trend
+
+```{r}
+# load stack raster
+raster_stack_all <- raster::stack("./Results/raster_stack_all_update.tif")
+
+# convert start to data frame and keep coordinates
+# Convert the RasterStack to points
+raster_stack_all <- raster::rasterToPoints(raster_stack_all)
+
+# Convert the points to a DataFrame
+raster_stack_all_df <- as.data.frame(raster_stack_all, xy = TRUE)
+
+
+## data clean
+# raster_stack_all_df1 <- raster_stack_all_df %>%
+#         filter(!is.na(nightlight_trend_global) & !is.na(NDVI_trend_global) & !is.na(PM2.5_trend_global) & co2_trend_global != 0 )
+
+raster_stack_all_df <- raster_stack_all_df %>%
+        drop_na()
+
+
+# giving scores to each indicator
+raster_stack_all_df$co2_score <- ifelse(raster_stack_all_df$co2_trend_global <= 0, 1, 0)
+
+raster_stack_all_df$PM2_5_score <- ifelse(raster_stack_all_df$PM2_5_trend_global_update <= 0, 1, 0)
+
+raster_stack_all_df$nightlight_score <- ifelse(raster_stack_all_df$nightlight_trend_global_update > 0, 1, 0)
+
+raster_stack_all_df$NDVI_score <- ifelse(raster_stack_all_df$NDVI_trend_global_update > 0, 1, 0)
+
+raster_stack_all_df$score <- raster_stack_all_df$co2_score + raster_stack_all_df$nightlight_score + raster_stack_all_df$NDVI_score + raster_stack_all_df$PM2_5_score
+
+raster_stack_all_df$score <- as.factor(raster_stack_all_df$score)
+
+saveRDS(raster_stack_all_df, file = "./Results/raster_stack_all_df_update.rds")
+
+# save the score to a raster
+raster_score <- raster_stack_all_df %>%
+        dplyr::select(x, y, score) %>%
+        mutate(score = as.factor(score)) %>%
+        raster::rasterFromXYZ(xyz = ., crs = "+proj=longlat +datum=WGS84 +no_defs")
+
+
+writeRaster(
+        x = raster_score,
+        filename = "./Results/raster_score_update.tif",
+        format = "GTiff",
+        overwrite = TRUE
+)
+
+```
+
+## 4. plot the raster score
+
+```{r}
+p_score <- ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = score)) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_manual(values = c( "#e12729",  "#f37324", "#f8cc1b",  "#72b043", "#007f4e"),
+                          name="Classification",
+                          labels=c("Very Bad","Bad","Medium", "Good", "Very Good" ))+
+  theme_minimal() +
+  labs(fill="score", x=NULL, y=NULL)
+
+# p_score <- p_score + ggtitle("Classification for PM2.5, CO2, Nightlight and NDVI",
+#                   subtitle = "Changes per decade were calculated from 2000 to 2019. A preventive trend will be assigned a positive score of 1, \nwhile a harmful trend will receive a score of 0")
+
+# save the p_score to tif
+tiff("./Results/result_plots/plot_score_update.tif", width = 2500, height = 1000, units = "px", res = 300)
+
+# Plot the ggplot
+print(p_score)
+
+# Close the TIFF device
+dev.off()
+```
+
+```{r}
+# plot other indictors
+# co2
+p_co2 <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = as.factor(co2_score))) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_manual(values = c( "#e12729",  "#72b043"),
+                          name="Trend",
+                          labels=c("Increase","Decline"))+
+  theme_minimal() +
+  labs(fill="co2_score", x=NULL, y=NULL)+
+        ggtitle("CO2")
+# pm2.5
+p_PM25 <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = as.factor(PM2_5_score))) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_manual(values = c( "#e12729",  "#72b043"),
+                          name="Trend",
+                          labels=c("Increase","Decline"))+
+  theme_minimal() +
+  labs(fill="PM2_5_score", x=NULL, y=NULL)+
+        ggtitle("PM2.5")
+
+# nightlight
+p_nightlight <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = as.factor(nightlight_score))) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_manual(values = c( "#e12729",  "#72b043"),
+                          name="Trend",
+                          labels=c("Decline","Increase"))+
+  theme_minimal() +
+  labs(fill="nightlight_score", x=NULL, y=NULL)+
+        ggtitle("Nightlight")
+
+# NDVI
+p_NDVI <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = as.factor(NDVI_score))) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_manual(values = c( "#e12729","#72b043"),
+                          name="Trend",
+                          labels=c("Decline","Increase"))+
+  theme_minimal() +
+  labs(fill="NDVI_score", x=NULL, y=NULL)+
+        ggtitle("NDVI")
+
+```
+
+```{r}
+# plot 4 indictor in one plot
+p_all <- cowplot::plot_grid(p_co2, p_PM25, p_nightlight, p_NDVI, ncol = 2, nrow = 2)
+
+# save the p_score to tif
+tiff("./Results/result_plots/plot_4indictors_update.tif", width = 5000, height = 2000, units = "px", res = 300)
+
+# Plot the ggplot
+print(p_all)
+
+# Close the TIFF device
+dev.off()
+```
+
+## 5. plot the trend of each indicator with exact value
+
+```{r}
+# co2
+p_co2_value <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = co2_trend_global_update)) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_viridis_c(option = "D")+
+  theme_minimal() +
+  labs(fill="CO2 trend", x=NULL, y=NULL)+
+        ggtitle("CO2")
+
+# pm2.5
+p_PM25_value <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = PM2_5_trend_global_update)) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_viridis_c(option = "D")+
+  theme_minimal() +
+  labs(fill="PM2.5 trend", x=NULL, y=NULL)+
+        ggtitle("PM2.5")
+
+# nightlight
+p_nightlight_value <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = nightlight_trend_global_update)) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_viridis_c(option = "D",direction = -1)+
+  theme_minimal() +
+  labs(fill="Nightlight trend", x=NULL, y=NULL)+
+        ggtitle("Nightlight")
+
+# NDVI
+p_NDVI_value <-ggplot(data = raster_stack_all_df, aes(x = x, y = y, fill = NDVI_trend_global_update)) +
+        geom_raster() +
+        coord_fixed()+
+        scale_fill_viridis_c(option = "D",direction = -1)+
+  theme_minimal() +
+  labs(fill="NDVI trend", x=NULL, y=NULL)+
+        ggtitle("NDVI")
+
+```
+
+```{r}
+# plot 4 indictor in one plot
+p_all_value <- cowplot::plot_grid(p_co2_value, p_PM25_value, p_nightlight_value, p_NDVI_value, ncol = 2, nrow = 2)
+
+# save the p_score to tif
+tiff("./Results/result_plots/plot_4indictors_value_update.tif", width = 5000, height = 2000, units = "px", res = 300)
+
+# Plot the ggplot
+print(p_all_value)
+
+# Close the TIFF device
+dev.off()
+```
+
+
+# 6. Category with 16 groups
+
+    1. population with year of 2019
+    2. population with year of 2030 (SSP2)
+    3. category with 16 groups
+    4. calculate the number of population/proportions
+    
+```{r eval=FALSE, include=FALSE}
+# load category data
+raster_stack_all_df <- readRDS("./Results/raster_stack_all_df_update.rds")
+
+# create a variable with 16 categories 2^4=16
+raster_stack_all_df <- raster_stack_all_df %>%
+        mutate(combined_category = paste0(co2_score, PM2_5_score,nightlight_score, NDVI_score)) %>%
+        mutate(combined_category = factor(combined_category,levels = c("0000", "1000", "0100", "0010", "0001","1100", "1010","1001","0110","0101","0011", "1110", "1101", "1011", "0111", "1111")))%>%
+        mutate(combined_type = as.factor(as.numeric(combined_category)))
+
+# previous coding:
+# levels(raster_stack_all_df$combined_category)
+#  [1] "0000" "0001" "0010" "0011" "0100" "0101" "0110" "0111" "1000" "1001" "1010" "1011" "1100" "1101" "1110" "1111"
+
+raster_category <- raster_stack_all_df %>%
+        dplyr::select(x,y, combined_type) %>%
+        raster::rasterFromXYZ(xyz = ., crs = "+proj=longlat +datum=WGS84 +no_defs")
+
+writeRaster(
+        x = raster_category,
+        filename = "./plots_data/raster_category_16_update.tif",
+        format = "GTiff",
+        overwrite = TRUE
+)
+
+# load data from 2019
+year_data_df_2019 <- stack("./plots_data/landscan_global_UN_adjusted_2019.tif")
+
+#year_pop_2019 <- subset(year_data_df_2019, subset = "pop")
+
+
+### convert it to 0.1 resolution by sum all pop
+# Load the raster data
+r <- year_data_df_2019
+
+# Define the factor of aggregation
+# Current resolution is 0.008333333 (approximately 1/120 degrees), and target is 0.1 degrees.
+# Factor is calculated as: 0.1 / 0.008333333 ≈ 12
+aggregation_factor <- round(0.1 / res(r)[1])
+
+# Aggregate raster to 0.1-degree resolution by summing values
+r_aggregated <- aggregate(r, fact = aggregation_factor, fun = sum, na.rm = TRUE)
+
+year_pop_2019_resample <- resample(r_aggregated, raster_category,  method='ngb')  # using ngb to keep value consistent
+
+cellStats(year_pop_2019_resample,stat = sum)
+
+writeRaster(
+        x = year_pop_2019_resample,
+        filename = "./plots_data/year_pop_2019_resample_UN_adjusted.tif",
+        format = "GTiff",
+        overwrite = TRUE
+)
+
+# load population 2030
+
+for (i in 3:5) {
+        year_pop_ssp_2030 <- raster(paste0("S:\\MNHS-SPHPM-CARE\\GLOBALENVIRONHealth\\Global SSP population data 2010_2100\\1km downscaled projects\\SSP",i,"_1km_netcdf\\SSP",i,"_1km\\ssp",i,"_total_2030.nc4"))
+
+factor <- 0.1 / 0.008333333
+year_pop_ssp_2030_0.1 <- aggregate(year_pop_ssp_2030, fact=factor, fun=sum, na.rm=TRUE)
+
+
+year_pop_ssp_2030_resample <- resample(year_pop_ssp_2030_0.1, raster_category,  method='bilinear')
+
+writeRaster(
+        x = year_pop_ssp_2030_resample,
+        filename = paste0("./plots_data/year_pop_ssp",i,"_2030_resample.tif"),
+        format = "GTiff",
+        overwrite = TRUE
+)
+        
+}
+
+```
+
+```{r}
+# load population 2019, 2030 and category
+pop_2019 <- raster::raster(x = "./plots_data/year_pop_2019_resample_UN_adjusted.tif")
+
+pop_2030_ssp1 <- raster::raster(x = "./plots_data/year_pop_ssp1_2030_resample.tif")
+pop_2030_ssp2 <- raster::raster(x = "./plots_data/year_pop_ssp2_2030_resample.tif")
+pop_2030_ssp3 <- raster::raster(x = "./plots_data/year_pop_ssp3_2030_resample.tif")
+pop_2030_ssp4 <- raster::raster(x = "./plots_data/year_pop_ssp4_2030_resample.tif")
+pop_2030_ssp5 <- raster::raster(x = "./plots_data/year_pop_ssp5_2030_resample.tif")
+
+category_type <- raster::raster(x = "./plots_data/raster_category_16_update.tif")
+
+
+raster_category_pop_2019_2030 <-
+                stack(c(category_type, pop_2019, pop_2030_ssp1,pop_2030_ssp2,pop_2030_ssp3,pop_2030_ssp4,pop_2030_ssp5))
+
+names(raster_category_pop_2019_2030) <- c("category", "pop_2019","pop_2030_ssp1","pop_2030_ssp2","pop_2030_ssp3","pop_2030_ssp4","pop_2030_ssp5")
+
+Fig3_df <- raster_category_pop_2019_2030 %>%
+        raster::as.data.frame(xy = TRUE) %>%
+        filter(is.na(category)==FALSE)
+
+saveRDS(Fig3_df, "./plots_data/Fig_df_update.rds")
+
+# # save as tif
+# raster_category_pop_2019_2030 <- st_as_stars(raster_category_pop_2019_2030)
+# 
+# write_stars(raster_category_pop_2019_2030, "./plots_data/raster_category_pop_2019_2030_update_20241213.tif")
+
+Fig3 <- Fig3_df %>%
+        mutate(category = as.factor(category)) %>%
+        group_by(category) %>%
+        summarise(sum_pop_2019 = sum(pop_2019, na.rm = TRUE),
+                  sum_pop_2030_ssp1 = sum(pop_2030_ssp1, na.rm = TRUE),
+                  sum_pop_2030_ssp2 = sum(pop_2030_ssp2, na.rm = TRUE),
+                  sum_pop_2030_ssp3 = sum(pop_2030_ssp3, na.rm = TRUE),
+                  sum_pop_2030_ssp4 = sum(pop_2030_ssp4, na.rm = TRUE),
+                  sum_pop_2030_ssp5 = sum(pop_2030_ssp5, na.rm = TRUE)) %>%
+        mutate(proportion_2019 = round((sum_pop_2019/sum(sum_pop_2019,na.rm = TRUE))*100,2),
+              proportion_2030_ssp1 = round((sum_pop_2030_ssp1/sum(sum_pop_2030_ssp1,na.rm = TRUE))*100,2),
+             proportion_2030_ssp2 = round((sum_pop_2030_ssp2/sum(sum_pop_2030_ssp2,na.rm = TRUE))*100,2),
+              proportion_2030_ssp3 = round((sum_pop_2030_ssp3/sum(sum_pop_2030_ssp3,na.rm = TRUE))*100,2),
+             proportion_2030_ssp4 = round((sum_pop_2030_ssp4/sum(sum_pop_2030_ssp4,na.rm = TRUE))*100,2),
+              proportion_2030_ssp5 = round((sum_pop_2030_ssp5/sum(sum_pop_2030_ssp5,na.rm = TRUE))*100,2)
+               )
+
+write.csv(Fig3, file = "./plots_data/Fig_3/Fig3_update_ssp1_5_update_UN_adjusted.csv")
+```
+
+# 6 Number(proportion) of the best and worst category
+
+    13 rows: Global, continent, income groups, urban and rural
+    
+    1. national shape files
+    2. continent shape files
+    3. nation with different income groups
+    4. urban /rural categories in 2019
+
+```{r}
+# load population, category_type, urbanization, income group
+pop_2019 <- raster::raster(x = "./plots_data/year_pop_2019_resample_UN_adjusted.tif")
+
+category_type <- raster::raster(x = "./plots_data/raster_category_16_update.tif")
+
+urban_2019 <- raster::raster(x = "./plots_data/year_urban_2019_resample.tif")
+
+income_group <- read.csv("./plots_data/World_bank_income_group_2019.csv")
+
+pop_2030 <- raster::raster(x = "./plots_data/year_pop_ssp2_2030_resample.tif")
+
+raster_category_pop_urban <-
+                stack(c(category_type, pop_2019,pop_2030, urban_2019)) %>%
+                as.data.frame(xy = TRUE) 
+
+```
+
+```{r}
+
+# load region raster data for sub-region categorization
+region_raster_df <- readRDS("./plots_data/region_raster_df.rds")
+
+sub_region_category_intersect <- raster_category_pop_urban %>%
+        left_join(region_raster_df, by = c("x"="X", "y"="Y"))
+```
+
+```{r}
+table1_df <- sub_region_category_intersect %>%
+        filter(is.na(raster_category_16_update)==FALSE)
+
+# link income group
+table1_df <- table1_df %>%
+        left_join(income_group,by = c("iso_a3"="ISO3"))
+
+# Table 1 calculation
+table1_df <- table1_df %>%
+        mutate(raster_category_16 = factor(raster_category_16_update, levels = 1:16),
+               raster_category_16_update = NULL,
+               SUBREGION2 = factor(SUBREGION2, levels = c("Northern America","Latin America and the Caribbean","Northern Europe","Eastern Europe","Western Europe","Southern Europe","Northern Africa","Sub-Saharan Africa","South-eastern Asia","Western Asia","Central Asia","Southern Asia","Eastern Asia","Australia and New Zealand","Other regions in Oceania")),
+               REGION = factor(REGION,levels = c("Americas","Europe","Africa","Asia","Oceania")),
+               Income2019 = factor(Income2019, levels = c("H","UM","LM","L")),
+               urban_2019 = if_else(year_urban_2019_resample == 30, "Urban centre", if_else(year_urban_2019_resample == 10,"Water", "Rural")),
+               urban_2019 = factor(urban_2019, levels = c("Urban centre","Rural","Water")))
+
+
+#saveRDS(table1_df, file = "./plots_data/Table1/table1_df_update.rds")
+```
+
+
+```{r}
+# Assuming your dataframe is named df
+df <- table1_df %>%
+        drop_na()
+
+# Create a summary table with total population for each raster category, their proportions, and total sum
+summary_table <- df %>%
+        # Add a constant column for global aggregation
+        mutate(Global = "Global") %>%
+        # Gathering data to long format for easier summarization
+        pivot_longer(cols = c("Global", "REGION", "Income2019", "urban_2019"), names_to = "Category", values_to = "Value") %>%
+        # Grouping by the new long format categories and raster category
+        group_by(Category, Value, raster_category_16) %>%
+        # Summarizing with sum of year_pop_2019_resample
+        summarise(Total_Population = sum(year_pop_2019_resample,na.rm = TRUE), .groups = 'drop') %>%
+        # Calculate total sum across all categories within each group
+        group_by(Category, Value) %>%
+        mutate(Total_Sum = sum(Total_Population,na.rm = TRUE)) %>%
+        # Calculate proportion for each category
+        mutate(Proportion = round(Total_Population / Total_Sum*100,2)) %>%
+        ungroup() %>%
+        # Pivot wider to get separate columns for each raster category
+        pivot_wider(names_from = raster_category_16, values_from = c(Total_Population, Proportion), names_sep = "_")
+
+write.csv(summary_table, file = "./plots_data/Table1/summary_table1_update.csv")
+
+```
+
+
+# 7 rank with nations
+
+        A.Top 15(or 20) countries by number of best category
+        B.Top 15(or 20) countries by number of worst category
+        C.Top 15(or 20) countries by proportion of best category
+        D.Top 15(or 20) countries by proportion of worst category
+        
+    1. calculate national population (best and worst)
+    2. calculate national population proportion (best and worst)
+    
+```{r}
+table1_df <- readRDS("./plots_data/table1_df_updated.rds")
+
+# group by country
+
+Fig4_data <- table1_df %>%
+        group_by(iso_a3, Country_name, raster_category_16) %>%
+        summarise(sum_pop = sum(year_pop_2019_resample,na.rm = TRUE)) %>%
+        group_by(iso_a3,Country_name) %>%
+        mutate(proportion = sum_pop/sum(sum_pop,na.rm = TRUE),
+               proportion = round(proportion*100,2))
+
+#saveRDS(Fig4_data, file = "./plots_data/Fig4/Fig4_data_update.rds")
+
+# A.Top 15(or 20) countries by number of best category
+
+top15_best_numb <- Fig4_data %>%
+        filter(raster_category_16 == 16) %>%
+        arrange(desc(sum_pop))
+top15_best_numb <- top15_best_numb[1:15,]
+
+# write.csv(top15_best_numb, file = "./plots_data/Fig4/top15_best_numb_update.csv")
+
+# B.Top 15(or 20) countries by number of worst category
+top15_worst_numb <- Fig4_data %>%
+        filter(raster_category_16 == 1) %>%
+        arrange(desc(sum_pop)) 
+top15_worst_numb <- top15_worst_numb[1:15,]
+
+# write.csv(top15_worst_numb, file = "./plots_data/Fig4/top15_worst_numb_update.csv")
+
+# C.Top 15(or 20) countries by proportion of best category
+top15_best_proportion <- Fig4_data %>%
+        filter(raster_category_16 == 16) %>%
+        arrange(desc(proportion)) 
+top15_best_proportion <- top15_best_proportion[1:15,]
+
+# write.csv(top15_best_proportion, file = "./plots_data/Fig4/top15_best_proportion_update.csv")
+
+# D.Top 15(or 20) countries by proportion of worst category
+top15_worst_proportion <- Fig4_data %>%
+        filter(raster_category_16 == 1) %>%
+        arrange(desc(proportion)) 
+top15_worst_proportion <- top15_worst_proportion[1:15,]
+# write.csv(top15_worst_proportion, file = "./plots_data/Fig4/top15_worst_proportion_update.csv")
+
+```
